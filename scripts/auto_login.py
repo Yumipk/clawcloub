@@ -17,7 +17,7 @@ import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ==================== 配置 ====================
-CLAW_CLOUD_URL = "https://eu-central-1.run.claw.cloud"
+CLAW_CLOUD_URL = "https://ap-northeast-1.run.claw.cloud"
 SIGNIN_URL = f"{CLAW_CLOUD_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # 设备验证等待时间
 TWO_FACTOR_WAIT = 120    # 2FA验证等待时间（备用，如果你未来开启2FA）
