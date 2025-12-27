@@ -2,6 +2,7 @@
 """
 ClawCloud 自动登录脚本
 - 等待设备验证批准（30秒）
+- 智能2FA检测：有则处理，无则跳过
 - 每次登录后自动更新 Cookie
 - Telegram 通知
 """
@@ -16,9 +17,10 @@ import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ==================== 配置 ====================
-CLAW_CLOUD_URL = "https://ap-northeast-1.run.claw.cloud"
+CLAW_CLOUD_URL = "https://eu-central-1.run.claw.cloud"
 SIGNIN_URL = f"{CLAW_CLOUD_URL}/signin"
-DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
+DEVICE_VERIFY_WAIT = 30  # 设备验证等待时间
+TWO_FACTOR_WAIT = 120    # 2FA验证等待时间（备用，如果你未来开启2FA）
 
 
 class Telegram:
@@ -71,6 +73,50 @@ class Telegram:
         except:
             pass
         return 0
+    
+    def wait_code(self, timeout=120):
+        """
+        等待你在 TG 里发 /code 123456
+        只接受来自 TG_CHAT_ID 的消息
+        """
+        if not self.ok:
+            return None
+        
+        # 先刷新 offset，避免读到旧的 /code
+        offset = self.flush_updates()
+        deadline = time.time() + timeout
+        pattern = re.compile(r"^/code\s+(\d{6,8})$")  # 6位TOTP 或 8位恢复码也行
+        
+        while time.time() < deadline:
+            try:
+                r = requests.get(
+                    f"https://api.telegram.org/bot{self.token}/getUpdates",
+                    params={"timeout": 20, "offset": offset},
+                    timeout=30
+                )
+                data = r.json()
+                if not data.get("ok"):
+                    time.sleep(2)
+                    continue
+                
+                for upd in data.get("result", []):
+                    offset = upd["update_id"] + 1
+                    msg = upd.get("message") or {}
+                    chat = msg.get("chat") or {}
+                    if str(chat.get("id")) != str(self.chat_id):
+                        continue
+                    
+                    text = (msg.get("text") or "").strip()
+                    m = pattern.match(text)
+                    if m:
+                        return m.group(1)
+            
+            except Exception:
+                pass
+            
+            time.sleep(2)
+        
+        return None
 
 
 class SecretUpdater:
@@ -329,8 +375,174 @@ class AutoLogin:
         self.tg.send("❌ <b>设备验证超时</b>")
         return False
     
+    def detect_and_handle_2fa(self, page):
+        """
+        智能检测并处理2FA
+        返回: True=成功处理或无需处理, False=处理失败
+        """
+        url = page.url
+        self.log(f"检测2FA状态: {self._mask_url(url)}", "INFO")
+        
+        # 检查是否在2FA页面
+        if "two-factor" not in url:
+            self.log("未检测到2FA要求，跳过2FA步骤", "SUCCESS")
+            return True
+        
+        self.log("检测到需要2FA验证", "WARN")
+        self.shot(page, "2FA检测")
+        
+        # 检查2FA类型
+        if "two-factor/mobile" in url:
+            # GitHub Mobile 2FA: 等待在手机上批准
+            return self._handle_mobile_2fa(page)
+        else:
+            # 其他2FA类型: TOTP验证码或恢复码
+            return self._handle_code_2fa(page)
+    
+    def _handle_mobile_2fa(self, page):
+        """处理GitHub Mobile 2FA"""
+        self.log(f"需要GitHub Mobile 2FA，等待 {TWO_FACTOR_WAIT} 秒...", "WARN")
+        
+        # 先截图并立刻发出去
+        shot = self.shot(page, "2FA_mobile")
+        self.tg.send(f"""⚠️ <b>需要GitHub Mobile 2FA</b>
+
+请打开手机GitHub App批准本次登录。
+等待时间：{TWO_FACTOR_WAIT} 秒""")
+        
+        if shot:
+            self.tg.photo(shot, "GitHub Mobile 2FA页面")
+        
+        # 不要频繁reload，避免把流程刷回登录页
+        start_time = time.time()
+        deadline = start_time + TWO_FACTOR_WAIT
+        
+        while time.time() < deadline:
+            time.sleep(1)
+            
+            url = page.url
+            
+            # 如果离开 two-factor 流程页面，认为通过
+            if "github.com/sessions/two-factor/" not in url:
+                self.log("GitHub Mobile 2FA通过！", "SUCCESS")
+                self.tg.send("✅ <b>GitHub Mobile 2FA通过</b>")
+                return True
+            
+            # 如果被刷回登录页，说明这次流程断了
+            if "github.com/login" in url:
+                self.log("2FA后回到了登录页，需重新登录", "ERROR")
+                return False
+            
+            # 每 10 秒打印一次，并补发一次截图
+            elapsed = int(time.time() - start_time)
+            if elapsed % 10 == 0 and elapsed != 0:
+                self.log(f"  等待GitHub Mobile 2FA... ({elapsed}/{TWO_FACTOR_WAIT}秒)")
+                shot = self.shot(page, f"2FA_mobile_{elapsed}s")
+                if shot:
+                    self.tg.photo(shot, f"GitHub Mobile 2FA页面（第{elapsed}秒）")
+            
+            # 只在 30 秒、60 秒... 做一次轻刷新
+            if elapsed % 30 == 0 and elapsed != 0:
+                try:
+                    page.reload(timeout=30000)
+                    page.wait_for_load_state('domcontentloaded', timeout=30000)
+                except:
+                    pass
+        
+        self.log("GitHub Mobile 2FA超时", "ERROR")
+        self.tg.send("❌ <b>GitHub Mobile 2FA超时</b>")
+        return False
+    
+    def _handle_code_2fa(self, page):
+        """处理TOTP验证码2FA"""
+        self.log("需要输入2FA验证码", "WARN")
+        shot = self.shot(page, "2FA_code")
+        
+        # 发送提示并等待验证码
+        self.tg.send(f"""🔐 <b>需要2FA验证码登录</b>
+
+请在 Telegram 里发送：
+<code>/code 你的6位验证码</code>
+
+等待时间：{TWO_FACTOR_WAIT} 秒""")
+        
+        if shot:
+            self.tg.photo(shot, "2FA验证码输入页面")
+        
+        self.log(f"等待2FA验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
+        code = self.tg.wait_code(timeout=TWO_FACTOR_WAIT)
+        
+        if not code:
+            self.log("等待2FA验证码超时", "ERROR")
+            self.tg.send("❌ <b>等待2FA验证码超时</b>")
+            return False
+        
+        # 不打印验证码明文，只提示收到
+        self.log("收到2FA验证码，正在填入...", "SUCCESS")
+        self.tg.send("✅ 收到2FA验证码，正在填入...")
+        
+        # 常见 OTP 输入框 selector（优先级排序）
+        selectors = [
+            'input[autocomplete="one-time-code"]',
+            'input[name="app_otp"]',
+            'input[name="otp"]',
+            'input#app_totp',
+            'input#otp',
+            'input[inputmode="numeric"]'
+        ]
+        
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=2000):
+                    el.fill(code)
+                    self.log(f"已填入2FA验证码", "SUCCESS")
+                    time.sleep(1)
+                    
+                    # 优先点击 Verify 按钮，不行再 Enter
+                    submitted = False
+                    verify_btns = [
+                        'button:has-text("Verify")',
+                        'button[type="submit"]',
+                        'input[type="submit"]'
+                    ]
+                    for btn_sel in verify_btns:
+                        try:
+                            btn = page.locator(btn_sel).first
+                            if btn.is_visible(timeout=1000):
+                                btn.click()
+                                submitted = True
+                                self.log("已点击 Verify 按钮", "SUCCESS")
+                                break
+                        except:
+                            pass
+                    
+                    if not submitted:
+                        page.keyboard.press("Enter")
+                        self.log("已按 Enter 提交", "SUCCESS")
+                    
+                    time.sleep(3)
+                    page.wait_for_load_state('networkidle', timeout=30000)
+                    self.shot(page, "2FA验证码提交后")
+                    
+                    # 检查是否通过
+                    if "github.com/sessions/two-factor/" not in page.url:
+                        self.log("2FA验证码验证通过！", "SUCCESS")
+                        self.tg.send("✅ <b>2FA验证码验证通过</b>")
+                        return True
+                    else:
+                        self.log("2FA验证码可能错误", "ERROR")
+                        self.tg.send("❌ <b>2FA验证码可能错误，请检查后重试</b>")
+                        return False
+            except:
+                pass
+        
+        self.log("没找到2FA验证码输入框", "ERROR")
+        self.tg.send("❌ <b>没找到2FA验证码输入框</b>")
+        return False
+    
     def login_github(self, page):
-        """登录 GitHub - 简化日志版"""
+        """登录 GitHub - 智能处理设备验证和2FA"""
         self.log("登录 GitHub...", "STEP")
         self.shot(page, "github_登录页")
         
@@ -375,7 +587,7 @@ class AutoLogin:
         url = page.url
         self.log(f"当前页面: {self._mask_url(url)}")
         
-        # 设备验证
+        # 1. 设备验证
         if 'verified-device' in url or 'device-verification' in url:
             if not self.wait_device(page):
                 return False
@@ -403,6 +615,10 @@ class AutoLogin:
                             break
                     except:
                         pass
+        
+        # 2. 智能检测和处理2FA
+        if not self.detect_and_handle_2fa(page):
+            return False
         
         # 错误检查
         try:
@@ -523,7 +739,14 @@ class AutoLogin:
             except Exception as e:
                 self.log(f"访问 {name} 失败: {e}", "WARN")
         
-        self.shot(page, "完成")
+        # 最后确保回到控制台页面再截图
+        try:
+            page.goto(f"{CLAW_CLOUD_URL}/", timeout=30000)
+            page.wait_for_load_state('networkidle', timeout=15000)
+            time.sleep(2)
+            self.shot(page, "完成")
+        except:
+            self.shot(page, "完成")
     
     def notify(self, ok, err=""):
         if not self.tg.ok:
@@ -639,7 +862,7 @@ class AutoLogin:
                 url = page.url
                 self.log(f"当前页面: {self._mask_url(url)}")
                 
-                # 3. GitHub 登录
+                # 3. GitHub 登录（包含智能2FA处理）
                 self.log("步骤3: GitHub 认证", "STEP")
                 
                 if 'github.com/login' in url or 'github.com/session' in url:
