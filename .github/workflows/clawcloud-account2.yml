@@ -3,7 +3,7 @@ name: "ClawCloud 账号2 保活（GitHub账号B）"
 on:
   schedule:
     # 每月1号和16号 UTC 8:00 运行（比账号1晚1小时）
-    - cron: '0 8 1,16 * *'
+    - cron: '0 8 8,23 * *'
   
   workflow_dispatch:
 
