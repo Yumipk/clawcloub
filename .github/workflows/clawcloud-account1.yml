@@ -51,7 +51,7 @@ jobs:
         echo "时间: $(date)"
         echo "=========================================="
         
-        python auto_login.py
+        python scripts/auto_login.py
         
         echo "=========================================="
         echo "✅ 自动登录完成"
