@@ -1,0 +1,58 @@
+name: "ClawCloud 账号2 保活（GitHub账号B）"
+
+on:
+  schedule:
+    # 每月1号和16号 UTC 8:00 运行（比账号1晚1小时）
+    - cron: '0 8 1,16 * *'
+  
+  workflow_dispatch:
+
+env:
+  # 使用账号2的配置
+  ACCOUNT_NAME: "账号2（GitHub账号B）"
+  CLAW_CLOUD_URL: ${{ secrets.CLAW_CLOUD_URL_2 }}
+  GH_USERNAME: ${{ secrets.GH_USERNAME_2 }}
+  GH_PASSWORD: ${{ secrets.GH_PASSWORD_2 }}
+  GH_SESSION: ${{ secrets.GH_SESSION_2 }}
+  TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID_2 }}
+  REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: "📥 检出代码"
+      uses: actions/checkout@v4
+    
+    - name: "🐍 设置 Python"
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: "📦 安装依赖"
+      run: |
+        python -m pip install --upgrade pip
+        pip install playwright requests nacl
+        playwright install chromium
+    
+    - name: "🚀 运行自动登录"
+      env:
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        TWO_FACTOR_WAIT: 120
+      run: |
+        echo "=========================================="
+        echo "🤖 开始执行 ClawCloud 自动登录"
+        echo "账户: $ACCOUNT_NAME"
+        echo "GitHub账号: $GH_USERNAME"
+        echo "地区: $CLAW_CLOUD_URL"
+        echo "时间: $(date)"
+        echo "=========================================="
+        
+        python auto_login.py
+        
+        echo "=========================================="
+        echo "✅ 自动登录完成"
+        echo "=========================================="
