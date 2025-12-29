@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-ClawCloud 自动登录脚本
+ClawCloud 自动登录脚本 - 多账号兼容版
+- 支持多账号配置（通过环境变量区分）
 - 等待设备验证批准（30秒）
 - 智能2FA检测：有则处理，无则跳过
 - 每次登录后自动更新 Cookie
@@ -17,10 +18,12 @@ import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ==================== 配置 ====================
-CLAW_CLOUD_URL = "https://ap-northeast-1.run.claw.cloud"
+# 从环境变量读取 ClawCloud URL，支持不同地区
+DEFAULT_CLAW_CLOUD_URL = "https://ap-northeast-1.run.claw.cloud"
+CLAW_CLOUD_URL = os.environ.get('CLAW_CLOUD_URL', DEFAULT_CLAW_CLOUD_URL)
 SIGNIN_URL = f"{CLAW_CLOUD_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # 设备验证等待时间
-TWO_FACTOR_WAIT = 120    # 2FA验证等待时间（备用，如果你未来开启2FA）
+TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证等待时间
 
 
 class Telegram:
@@ -171,9 +174,15 @@ class AutoLogin:
     """自动登录"""
     
     def __init__(self):
+        # 从环境变量读取所有配置
         self.username = os.environ.get('GH_USERNAME')
         self.password = os.environ.get('GH_PASSWORD')
         self.gh_session = os.environ.get('GH_SESSION', '').strip()
+        
+        # 从环境变量读取 ClawCloud URL，支持不同地区
+        self.clawcloud_url = os.environ.get('CLAW_CLOUD_URL', DEFAULT_CLAW_CLOUD_URL)
+        self.signin_url = f"{self.clawcloud_url}/signin"
+        
         self.tg = Telegram()
         self.secret = SecretUpdater()
         self.shots = []
@@ -632,7 +641,7 @@ class AutoLogin:
         return True
     
     def complete_oauth_flow(self, page):
-        """完成 OAuth 流程 - 简化日志版"""
+        """完成 OAuth 流程"""
         self.log("处理 OAuth 流程...", "STEP")
         
         max_attempts = 30
@@ -640,7 +649,7 @@ class AutoLogin:
             url = page.url
             
             # 如果已经在ClawCloud，成功
-            if 'claw.cloud' in url and 'signin' not in url.lower():
+            if self.clawcloud_url in url and 'signin' not in url.lower():
                 self.log("已在ClawCloud页面", "SUCCESS")
                 return True
             
@@ -675,7 +684,7 @@ class AutoLogin:
                 if attempt % 5 == 0:  # 每5次记录一次
                     self.log("在GitHub页面，尝试访问ClawCloud", "INFO")
                 try:
-                    page.goto(SIGNIN_URL, timeout=30000)
+                    page.goto(self.signin_url, timeout=30000)
                     try:
                         page.wait_for_load_state('networkidle', timeout=15000)
                     except:
@@ -686,7 +695,7 @@ class AutoLogin:
                     pass
             
             # 如果还是回到ClawCloud登录页，尝试再次点击GitHub按钮
-            elif 'claw.cloud' in url and 'signin' in url.lower():
+            elif self.clawcloud_url in url and 'signin' in url.lower():
                 if attempt % 5 == 0:  # 每5次记录一次
                     self.shot(page, f"clawcloud_登录页_{attempt}")
                     self.log("回到ClawCloud登录页，尝试再次点击GitHub", "INFO")
@@ -722,9 +731,9 @@ class AutoLogin:
         """保活"""
         self.log("保活...", "STEP")
         urls_to_visit = [
-            (f"{CLAW_CLOUD_URL}/", "控制台"),
-            (f"{CLAW_CLOUD_URL}/apps", "应用"),
-            (f"{CLAW_CLOUD_URL}/account", "账户")
+            (f"{self.clawcloud_url}/", "控制台"),
+            (f"{self.clawcloud_url}/apps", "应用"),
+            (f"{self.clawcloud_url}/account", "账户")
         ]
         
         for url, name in urls_to_visit:
@@ -741,7 +750,7 @@ class AutoLogin:
         
         # 最后确保回到控制台页面再截图
         try:
-            page.goto(f"{CLAW_CLOUD_URL}/", timeout=30000)
+            page.goto(f"{self.clawcloud_url}/", timeout=30000)
             page.wait_for_load_state('networkidle', timeout=15000)
             time.sleep(2)
             self.shot(page, "完成")
@@ -774,11 +783,15 @@ class AutoLogin:
                 self.tg.photo(self.shots[-1], "完成")
     
     def run(self):
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print("🚀 ClawCloud 自动登录")
-        print("="*50 + "\n")
+        print("="*60 + "\n")
         
-        self.log(f"用户名: {self.username}")
+        # 获取账号标识（从用户名或环境变量）
+        account_name = os.environ.get('ACCOUNT_NAME', '默认账号')
+        self.log(f"账号: {account_name}")
+        self.log(f"地区: {self.clawcloud_url}")
+        self.log(f"用户名: {self.username[:3]}***" if self.username else "未设置")
         self.log(f"Session: {'有' if self.gh_session else '无'}")
         self.log(f"密码: {'有' if self.password else '无'}")
         
@@ -809,7 +822,7 @@ class AutoLogin:
                 
                 # 1. 访问 ClawCloud
                 self.log("步骤1: 打开 ClawCloud", "STEP")
-                page.goto(SIGNIN_URL, timeout=60000)
+                page.goto(self.signin_url, timeout=60000)
                 try:
                     page.wait_for_load_state('networkidle', timeout=30000)
                 except:
@@ -882,7 +895,7 @@ class AutoLogin:
                 
                 # 5. 验证
                 self.log("步骤5: 验证", "STEP")
-                if 'claw.cloud' not in page.url or 'signin' in page.url.lower():
+                if self.clawcloud_url not in page.url or 'signin' in page.url.lower():
                     self.shot(page, "验证失败")
                     self.notify(False, "验证失败")
                     sys.exit(1)
@@ -899,9 +912,9 @@ class AutoLogin:
                     self.log("未获取到新 Cookie", "WARN")
                 
                 self.notify(True)
-                print("\n" + "="*50)
+                print("\n" + "="*60)
                 print("✅ 成功！")
-                print("="*50 + "\n")
+                print("="*60 + "\n")
                 
             except Exception as e:
                 self.log(f"异常: {e}", "ERROR")
