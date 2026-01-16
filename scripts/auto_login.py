@@ -6,13 +6,14 @@ ClawCloud 自动登录脚本
 - Telegram 通知
 """
 
+import base64
 import os
+import re
 import sys
 import time
-import base64
-import re
-import requests
 from urllib.parse import urlparse
+
+import requests
 from playwright.sync_api import sync_playwright
 
 # ==================== 配置 ====================
@@ -285,8 +286,9 @@ class AutoLogin:
             # 通过 Telegram 发送
             self.tg.send(f"""🔑 <b>新 Cookie</b>
 
-请更新 Secret <b>GH_SESSION</b>:
-<code>{value}</code>""")
+请更新 Secret <b>GH_SESSION</b> (点击查看):
+<tg-spoiler>{value}</tg-spoiler>
+""")
             self.log("已通过 Telegram 发送 Cookie", "SUCCESS")
     
     def wait_device(self, page):
@@ -378,13 +380,37 @@ class AutoLogin:
         """处理 TOTP 验证码输入（通过 Telegram 发送 /code 123456）"""
         self.log("需要输入验证码", "WARN")
         shot = self.shot(page, "两步验证_code")
-        
-        # 先尝试点击"Use an authentication app"或类似按钮（如果在 mobile 页面）
+
+        # 如果是 Security Key (webauthn) 页面，尝试切换到 Authenticator App
+        if 'two-factor/webauthn' in page.url:
+            self.log("检测到 Security Key 页面，尝试切换...", "INFO")
+            try:
+                # 点击 "More options"
+                more_options_button = page.locator('button:has-text("More options")').first
+                if more_options_button.is_visible(timeout=3000):
+                    more_options_button.click()
+                    self.log("已点击 'More options'", "SUCCESS")
+                    time.sleep(1) # 等待菜单出现
+                    self.shot(page, "点击more_options后")
+
+                    # 点击 "Authenticator app"
+                    auth_app_button = page.locator('button:has-text("Authenticator app")').first
+                    if auth_app_button.is_visible(timeout=2000):
+                        auth_app_button.click()
+                        self.log("已选择 'Authenticator app'", "SUCCESS")
+                        time.sleep(2)
+                        page.wait_for_load_state('networkidle', timeout=15000)
+                        shot = self.shot(page, "切换到验证码输入页") # 更新截图
+            except Exception as e:
+                self.log(f"切换验证方式时出错: {e}", "WARN")
+
+        # (保留) 先尝试点击"Use an authentication app"或类似按钮（如果在 mobile 页面）
         try:
             more_options = [
                 'a:has-text("Use an authentication app")',
                 'a:has-text("Enter a code")',
                 'button:has-text("Use an authentication app")',
+                'button:has-text("Authenticator app")',
                 '[href*="two-factor/app"]'
             ]
             for sel in more_options:
@@ -401,29 +427,29 @@ class AutoLogin:
                     pass
         except:
             pass
-        
+
         # 发送提示并等待验证码
         self.tg.send(f"""🔐 <b>需要验证码登录</b>
 
-请在 Telegram 里发送：
+用户{self.username}正在登录，请在 Telegram 里发送：
 <code>/code 你的6位验证码</code>
 
 等待时间：{TWO_FACTOR_WAIT} 秒""")
         if shot:
             self.tg.photo(shot, "两步验证页面")
-        
+
         self.log(f"等待验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
         code = self.tg.wait_code(timeout=TWO_FACTOR_WAIT)
-        
+
         if not code:
             self.log("等待验证码超时", "ERROR")
             self.tg.send("❌ <b>等待验证码超时</b>")
             return False
-        
+
         # 不打印验证码明文，只提示收到
         self.log("收到验证码，正在填入...", "SUCCESS")
         self.tg.send("✅ 收到验证码，正在填入...")
-        
+
         # 常见 OTP 输入框 selector（优先级排序）
         selectors = [
             'input[autocomplete="one-time-code"]',
@@ -433,7 +459,7 @@ class AutoLogin:
             'input#otp',
             'input[inputmode="numeric"]'
         ]
-        
+
         for sel in selectors:
             try:
                 el = page.locator(sel).first
@@ -441,7 +467,7 @@ class AutoLogin:
                     el.fill(code)
                     self.log(f"已填入验证码", "SUCCESS")
                     time.sleep(1)
-                    
+
                     # 优先点击 Verify 按钮，不行再 Enter
                     submitted = False
                     verify_btns = [
@@ -459,15 +485,15 @@ class AutoLogin:
                                 break
                         except:
                             pass
-                    
+
                     if not submitted:
                         page.keyboard.press("Enter")
                         self.log("已按 Enter 提交", "SUCCESS")
-                    
+
                     time.sleep(3)
                     page.wait_for_load_state('networkidle', timeout=30000)
                     self.shot(page, "验证码提交后")
-                    
+
                     # 检查是否通过
                     if "github.com/sessions/two-factor/" not in page.url:
                         self.log("验证码验证通过！", "SUCCESS")
@@ -479,7 +505,7 @@ class AutoLogin:
                         return False
             except:
                 pass
-        
+
         self.log("没找到验证码输入框", "ERROR")
         self.tg.send("❌ <b>没找到验证码输入框</b>")
         return False
@@ -649,6 +675,8 @@ class AutoLogin:
                 for s in self.shots[-3:]:
                     self.tg.photo(s, s)
             else:
+                # for s in self.shots[-3:]:
+                #     self.tg.photo(s, s)
                 self.tg.photo(self.shots[-1], "完成")
     
     def run(self):
@@ -689,28 +717,16 @@ class AutoLogin:
                 # 1. 访问 ClawCloud 登录入口
                 self.log("步骤1: 打开 ClawCloud 登录页", "STEP")
                 page.goto(SIGNIN_URL, timeout=60000)
-                page.wait_for_load_state('networkidle', timeout=30000)
+                page.wait_for_load_state('networkidle', timeout=60000)
                 time.sleep(2)
                 self.shot(page, "clawcloud")
                 
                 # 检查当前 URL，可能已经自动跳转到区域
                 current_url = page.url
                 self.log(f"当前 URL: {current_url}")
-                
-                if 'signin' not in current_url.lower() and 'claw.cloud' in current_url:
-                    self.log("已登录！", "SUCCESS")
-                    # 检测区域
-                    self.detect_region(current_url)
-                    self.keepalive(page)
-                    # 提取并保存新 Cookie
-                    new = self.get_session(context)
-                    if new:
-                        self.save_cookie(new)
-                    self.notify(True)
-                    print("\n✅ 成功！\n")
-                    return
-                
-                # 2. 点击 GitHub
+  
+            
+               # 2. 点击 GitHub
                 self.log("步骤2: 点击 GitHub", "STEP")
                 if not self.click(page, [
                     'button:has-text("GitHub")',
@@ -722,11 +738,25 @@ class AutoLogin:
                     sys.exit(1)
                 
                 time.sleep(3)
-                page.wait_for_load_state('networkidle', timeout=30000)
+                page.wait_for_load_state('networkidle', timeout=120000)
                 self.shot(page, "点击后")
-                
                 url = page.url
                 self.log(f"当前: {url}")
+
+                if 'signin' not in url.lower() and 'claw.cloud' in url and  'github.com' not in url:
+                    self.log("已登录！", "SUCCESS")
+                    # 检测区域
+                    self.detect_region(url)
+                    self.keepalive(page)
+                    # 提取并保存新 Cookie
+                    new = self.get_session(context)
+                    if new:
+                        self.save_cookie(new)
+                    self.notify(True)
+                    print("\n✅ 成功！\n")
+                    return
+                
+
                 
                 # 3. GitHub 登录
                 self.log("步骤3: GitHub 认证", "STEP")
