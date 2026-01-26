@@ -617,6 +617,47 @@ class AutoLogin:
         self.log("重定向超时", "ERROR")
         return False
     
+    def check_login_status(self, page):
+        """检查是否真正登录成功"""
+        current_url = page.url
+        
+        # 检查是否是引导页面
+        try:
+            page_text = page.content().lower()
+            if 'registration at least 7 days' in page_text or 'your github account needs to be' in page_text:
+                self.log("检测到引导页面（账户需要满足要求）", "WARN")
+                # 尝试寻找控制台入口
+                console_links = [
+                    'a[href*="/console"]',
+                    'a[href*="/apps"]',
+                    'a:has-text("Console")',
+                    'a:has-text("Dashboard")',
+                    'a:has-text("控制台")',
+                    'button:has-text("Get Started")'
+                ]
+                
+                for link_sel in console_links:
+                    try:
+                        el = page.locator(link_sel).first
+                        if el.is_visible(timeout=2000):
+                            el.click()
+                            self.log(f"已点击控制台入口: {link_sel}", "SUCCESS")
+                            page.wait_for_load_state('networkidle', timeout=30000)
+                            return True
+                    except:
+                        pass
+                
+                # 如果没有找到入口，但页面显示登录状态，也认为是成功的
+                if 'claw.cloud' in current_url and 'signin' not in current_url:
+                    self.log("虽然在引导页面，但已登录成功", "SUCCESS")
+                    return True
+                
+                return False
+        except:
+            pass
+        
+        return True
+    
     def keepalive(self, page):
         """保活 - 使用检测到的区域 URL"""
         self.log("保活...", "STEP")
@@ -626,8 +667,41 @@ class AutoLogin:
         self.log(f"使用区域 URL: {base_url}", "INFO")
         
         # 先截图当前页面（登录成功后的第一个页面）
+        current_title = page.title()
+        self.log(f"当前页面标题: {current_title}", "INFO")
         self.shot(page, "登录成功_初始页面")
         self.log(f"当前页面: {page.url}", "SUCCESS")
+        
+        # 检查是否在引导页面
+        page_content = page.content()
+        if 'registration at least 7 days' in page_content.lower():
+            self.log("当前在引导页面，尝试点击查看控制台", "WARN")
+            
+            # 尝试点击查看控制台
+            try:
+                # 尝试查找控制台入口
+                console_selectors = [
+                    'a:has-text("Console")',
+                    'a:has-text("Dashboard")',
+                    'a:has-text("控制台")',
+                    'a[href*="/console"]',
+                    'a[href*="/dashboard"]',
+                    'button:has-text("Get Started")'
+                ]
+                
+                for selector in console_selectors:
+                    try:
+                        el = page.locator(selector).first
+                        if el.is_visible(timeout=2000):
+                            el.click()
+                            page.wait_for_load_state('networkidle', timeout=30000)
+                            self.log(f"已点击: {selector}", "SUCCESS")
+                            self.shot(page, "点击进入控制台")
+                            break
+                    except:
+                        pass
+            except Exception as e:
+                self.log(f"尝试进入控制台失败: {e}", "WARN")
         
         pages_to_visit = [
             (f"{base_url}/", "控制台"),
@@ -648,10 +722,15 @@ class AutoLogin:
                 # 截取每个页面的截图
                 self.shot(page, f"保活_{name}")
                 
+                # 检查页面标题和内容
+                page_title = page.title()
+                page_url = page.url
+                self.log(f"页面标题: {page_title}", "INFO")
+                self.log(f"页面URL: {page_url}", "INFO")
+                
                 # 再次检测区域（以防中途跳转）
-                current_url = page.url
-                if 'claw.cloud' in current_url:
-                    self.detect_region(current_url)
+                if 'claw.cloud' in page_url:
+                    self.detect_region(page_url)
                 
                 time.sleep(2)
             except Exception as e:
@@ -661,8 +740,9 @@ class AutoLogin:
         try:
             page.goto(base_url, timeout=30000)
             page.wait_for_load_state('networkidle', timeout=15000)
+            final_title = page.title()
             self.shot(page, "登录完成_主页")
-            self.log("登录完成，当前在主页", "SUCCESS")
+            self.log(f"登录完成，当前在主页，标题: {final_title}", "SUCCESS")
             time.sleep(2)  # 等待页面完全加载
         except:
             pass
@@ -684,7 +764,7 @@ class AutoLogin:
         if err:
             msg += f"\n<b>错误:</b> {err}"
         
-        msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-6:])
+        msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-10:])
         
         self.tg.send(msg)
         
@@ -697,7 +777,7 @@ class AutoLogin:
                 # 成功时，优先发送登录后的截图
                 # 查找包含"登录成功"、"保活"或"登录完成"的截图
                 post_login_shots = []
-                keywords = ["登录成功", "保活", "登录完成"]
+                keywords = ["登录成功", "保活", "登录完成", "控制台", "应用", "账户"]
                 
                 # 从后往前找，找到登录成功后的截图
                 for s in reversed(self.shots):
@@ -780,12 +860,17 @@ class AutoLogin:
                 url = page.url
                 self.log(f"当前: {url}")
 
-                if 'signin' not in url.lower() and 'claw.cloud' in url and  'github.com' not in url:
+                if 'signin' not in url.lower() and 'claw.cloud' in url and 'github.com' not in url:
                     self.log("已登录！", "SUCCESS")
                     # 检测区域
                     self.detect_region(url)
                     # 立即截图
                     self.shot(page, "登录成功_直接进入")
+                    # 检查登录状态
+                    if not self.check_login_status(page):
+                        self.log("登录状态检查失败", "ERROR")
+                        self.notify(False, "登录状态检查失败")
+                        sys.exit(1)
                     self.keepalive(page)
                     # 提取并保存新 Cookie
                     new = self.get_session(context)
@@ -823,8 +908,15 @@ class AutoLogin:
                 
                 self.shot(page, "重定向成功")
                 
-                # 5. 验证
-                self.log("步骤5: 验证", "STEP")
+                # 5. 检查登录状态
+                self.log("步骤5: 检查登录状态", "STEP")
+                if not self.check_login_status(page):
+                    self.shot(page, "登录状态检查失败")
+                    self.notify(False, "登录状态检查失败")
+                    sys.exit(1)
+                
+                # 6. 验证
+                self.log("步骤6: 验证", "STEP")
                 current_url = page.url
                 if 'claw.cloud' not in current_url or 'signin' in current_url.lower():
                     self.notify(False, "验证失败")
@@ -834,11 +926,11 @@ class AutoLogin:
                 if not self.detected_region:
                     self.detect_region(current_url)
                 
-                # 6. 保活（使用检测到的区域 URL）
+                # 7. 保活（使用检测到的区域 URL）
                 self.keepalive(page)
                 
-                # 7. 提取并保存新 Cookie
-                self.log("步骤6: 更新 Cookie", "STEP")
+                # 8. 提取并保存新 Cookie
+                self.log("步骤7: 更新 Cookie", "STEP")
                 new = self.get_session(context)
                 if new:
                     self.save_cookie(new)
