@@ -1,8 +1,8 @@
-name: ClawCloud 自动登录保活
+name: ClawCloud Longin
 
 on:
   schedule:
-    - cron: '0 1 */5 * *'  # UTC 1:00，每5天运行
+    - cron: '0 8 */5 * *'  # UTC 8:00，每5天运行
   workflow_dispatch:
 
 jobs:
@@ -42,3 +42,5 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git commit --allow-empty -m "Chore: Keep-alive [skip ci]"
           git push || echo "No changes to push"
+
+
