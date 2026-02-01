@@ -2,7 +2,7 @@ name: ClawCloud Longin
 
 on:
   schedule:
-    - cron: '0 8 */5 * *'  # UTC 8:00，每5天运行
+    - cron: '0 8 */7 * *'  # UTC 8:00，每7天运行
   workflow_dispatch:
 
 jobs:
